@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Path, Body
 from fastapi.openapi.utils import get_openapi
 from enum import Enum
 from typing import Optional, List, Dict, Any
@@ -74,151 +74,119 @@ class ChangesResponse(BaseModel):
         description="Current maximum transaction ID in the store"
     )
 
+class DocumentInput(BaseModel):
+    value: Any = Field(..., description="Document content (any valid JSON)")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "value": {
+                    "name": "John Doe",
+                    "email": "john@example.com",
+                    "age": 30
+                }
+            }
+        }
+
 @app.put(
     "/{collection}/documents/{key}",
     response_model=DocumentResponse,
     tags=["Documents"],
-    summary="Create or update a document",
-    responses={
-        200: {"description": "Document created or updated successfully"},
-        400: {"description": "Invalid request body"},
-        422: {"description": "Validation error"}
-    }
+    summary="Create or update a document"
 )
 async def upsert_document(
-    collection: str = Field(..., description="Collection name"),
-    key: str = Field(..., description="Document key"),
-    request: Request = Field(..., description="Request with JSON body containing 'value' field")
+    document: DocumentInput = Body(..., description="Document to create or update"),
+    collection: str = Path(..., description="Collection name"),
+    key: str = Path(..., description="Document key")
 ):
-    """
-    Create or update a document in the specified collection.
-    
-    The request body must be a JSON object with a 'value' field containing any valid JSON data.
-    
-    Example:
-    ```json
-    {
-        "value": {
-            "name": "John Doe",
-            "email": "john@example.com",
-            "age": 30
-        }
-    }
-    ```
-    """
-    # ... implementation ...
+    """Create or update a document in the specified collection."""
+    try:
+        doc = store.upsert(collection, key, document.value)
+        return DocumentResponse(**doc.__dict__)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get(
     "/{collection}/documents/{key}",
     response_model=DocumentResponse,
     tags=["Documents"],
-    summary="Get a document",
-    responses={
-        200: {"description": "Document retrieved successfully"},
-        404: {"description": "Document not found"}
-    }
+    summary="Get a document"
 )
 async def get_document(
-    collection: str = Field(..., description="Collection name"),
-    key: str = Field(..., description="Document key"),
-    version: Optional[int] = Field(None, description="Specific version to retrieve")
+    collection: str = Path(..., description="Collection name"),
+    key: str = Path(..., description="Document key"),
+    version: Optional[int] = Query(None, description="Specific version to retrieve")
 ):
-    """
-    Retrieve a document by key, optionally specifying a version.
-    
-    If version is not specified, returns the latest version.
-    """
-    # ... implementation ...
+    """Retrieve a document by key, optionally specifying a version."""
+    doc = store.get(collection, key, version)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return DocumentResponse(**doc.__dict__)
 
 @app.delete(
     "/{collection}/documents/{key}",
     tags=["Documents"],
-    summary="Delete a document",
-    responses={
-        200: {"description": "Document deleted successfully"},
-        404: {"description": "Document not found"}
-    }
+    summary="Delete a document"
 )
 async def delete_document(
-    collection: str = Field(..., description="Collection name"),
-    key: str = Field(..., description="Document key")
+    collection: str = Path(..., description="Collection name"),
+    key: str = Path(..., description="Document key")
 ):
     """Delete a document from the specified collection."""
-    # ... implementation ...
+    if store.delete(collection, key):
+        return {"status": "deleted"}
+    raise HTTPException(status_code=404, detail="Document not found")
 
 @app.get(
     "/{collection}/documents",
     response_model=DocumentList,
     tags=["Documents"],
-    summary="List documents in a collection",
-    responses={
-        200: {"description": "Documents retrieved successfully"},
-        400: {"description": "Invalid query syntax"}
-    }
+    summary="List documents in a collection"
 )
 async def list_documents(
-    collection: str = Field(..., description="Collection name"),
-    latest_only: bool = Field(
-        False, 
-        description="If true, returns only the latest version of each document"
-    ),
-    where: Optional[str] = Field(
+    collection: str = Path(..., description="Collection name"),
+    latest_only: bool = Query(False, description="If true, returns only the latest version of each document"),
+    where: Optional[str] = Query(
         None, 
         description="SQL-like query to filter documents",
         example="value.age > 25 AND value.status = 'active'"
     )
 ):
-    """
-    List documents in a collection with optional filtering.
-    
-    The where parameter supports SQL-like syntax for querying JSON documents:
-    - Exact match: `value.name = 'John'`
-    - Numeric comparison: `value.age > 25`
-    - List membership: `value.status IN ('active', 'pending')`
-    - Null checks: `value.email IS NOT NULL`
-    - Range checks: `value.age BETWEEN 25 AND 50`
-    """
-    # ... implementation ...
+    """List documents in a collection with optional filtering."""
+    try:
+        if where:
+            documents = store.query_documents(collection, where, latest_only)
+        else:
+            documents = store.list_documents(collection, latest_only)
+        return DocumentList(documents=documents)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get(
     "/changes",
     response_model=ChangesResponse,
     tags=["Changes"],
-    summary="Get change feed",
-    responses={
-        200: {"description": "Changes retrieved successfully"},
-        400: {"description": "Invalid query syntax"}
-    }
+    summary="Get change feed"
 )
 async def get_changes(
-    start: int = Field(
-        0, 
-        description="Return changes after this transaction ID"
-    ),
-    limit: int = Field(
-        Query(default=2, ge=1, le=100),
-        description="Maximum number of changes to return"
-    ),
-    where: Optional[str] = Field(
+    start: int = Query(0, description="Return changes after this transaction ID"),
+    limit: int = Query(2, ge=1, le=100, description="Maximum number of changes to return"),
+    where: Optional[str] = Query(
         None,
         description="SQL-like query to filter changes",
         example="value.status = 'active'"
     ),
-    collection: Optional[str] = Field(
-        None,
-        description="Optional collection to filter changes"
-    )
+    collection: Optional[str] = Query(None, description="Optional collection to filter changes")
 ):
-    """
-    Get changes feed with optional filtering by collection and query.
-    
-    The response includes:
-    - List of changes (documents with their operations)
-    - Maximum transaction ID in the store
-    
-    Use the max_transaction_id to track progress and fetch next batch of changes.
-    """
-    # ... implementation ...
+    """Get changes feed with optional filtering by collection and query."""
+    changes = store.get_changes_after(start, limit=limit, where=where, collection=collection)
+    return ChangesResponse(
+        changes=[
+            DocumentResponse(**doc.__dict__, operation=operation.value)
+            for doc, operation in changes
+        ],
+        max_transaction_id=store.current_transaction_id
+    )
 
 def custom_openapi():
     if app.openapi_schema:
