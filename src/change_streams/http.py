@@ -241,6 +241,37 @@ async def get_changes(
         needs_rollback=False
     )
 
+@app.post(
+    "/{collection}/documents/{key}/evict",
+    tags=["Documents"],
+    summary="Evict a document",
+    responses={
+        200: {"description": "Document evicted successfully"},
+        404: {"description": "Document not found"}
+    }
+)
+async def evict_document(
+    collection: str = Path(..., description="Collection name"),
+    key: str = Path(..., description="Document key")
+):
+    """
+    Completely remove a document from the store.
+    
+    Unlike delete, eviction:
+    - Removes all document history
+    - Doesn't create a tombstone
+    - Cannot be tracked via changes feed
+    - Affects change feed rollback behavior
+    
+    Warning: Use with caution as this operation is irreversible.
+    """
+    if store.evict(collection, key):
+        return {
+            "status": "evicted",
+            "warning": "Document and all its history have been permanently removed"
+        }
+    raise HTTPException(status_code=404, detail="Document not found")
+
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema

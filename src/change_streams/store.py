@@ -83,11 +83,10 @@ class QueryParser:
 class KeyValueStore:
     def __init__(self, storage_path: str = "kvstore.json"):
         self.storage_path = storage_path
-        # Change store structure to support collections
-        self.store: Dict[str, Dict[str, List[Document]]] = {}  # collection -> key -> versions
+        self.store: Dict[str, Dict[str, List[Document]]] = {}
         self.current_transaction_id = 0
+        self.highest_removed_tombstone_id = 0
         self._load_from_disk()
-        self.query_parser = QueryParser()
 
     def _load_from_disk(self) -> None:
         """Load the store from disk if it exists."""
@@ -325,3 +324,25 @@ class KeyValueStore:
                     results[key] = matching_docs
         
         return results
+
+    def evict(self, collection: str, key: str) -> bool:
+        """
+        Completely remove a document from the store.
+        Unlike delete, this removes all history and doesn't create a tombstone.
+        """
+        if collection in self.store and key in self.store[collection]:
+            # Get the last transaction ID before removal
+            last_tx_id = self.store[collection][key][-1].transaction_id
+            if last_tx_id > self.highest_removed_tombstone_id:
+                self.highest_removed_tombstone_id = last_tx_id
+            
+            # Remove the document completely
+            del self.store[collection][key]
+            
+            # Remove empty collections
+            if not self.store[collection]:
+                del self.store[collection]
+                
+            self._save_to_disk()
+            return True
+        return False
