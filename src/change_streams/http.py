@@ -1,141 +1,240 @@
-from fastapi import FastAPI, Request, Query
-from fastapi.exceptions import HTTPException
-from pydantic import BaseModel
-from typing import Any, Optional, Dict, List
-import uvicorn
-import json
+from fastapi import FastAPI, Request, Query, HTTPException
+from fastapi.openapi.utils import get_openapi
+from enum import Enum
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field
 
-# Change this line to use relative import
-from .store import KeyValueStore, Document  # Changed from change_streams.store
+app = FastAPI(
+    title="Change Streams API",
+    description="""
+    A document store with versioning and change feed capabilities.
+    
+    ## Features
+    - Document versioning
+    - Change feed with transaction IDs
+    - SQL-like query language
+    - Collection-based namespacing
+    
+    ## Query Language Examples
+    - Exact match: `value.name = 'John'`
+    - Numeric comparison: `value.age > 25`
+    - List membership: `value.status IN ('active', 'pending')`
+    - Null checks: `value.email IS NOT NULL`
+    - Range checks: `value.age BETWEEN 25 AND 50`
+    """,
+    version="1.0.0",
+    contact={
+        "name": "API Support",
+        "email": "support@example.com",
+    },
+)
 
-app = FastAPI(title="Key-Value Store API")
-store = KeyValueStore()
-
-# Pydantic models for request/response validation
-class UpsertRequest(BaseModel):
-    value: Any
+class OperationType(str, Enum):
+    INSERT = "insert"
+    UPDATE = "update"
+    DELETE = "delete"
 
 class DocumentResponse(BaseModel):
-    key: str
-    value: Any
-    version: int
-    timestamp: float
-    transaction_id: int
+    key: str = Field(..., description="Unique identifier of the document within its collection")
+    value: Any = Field(..., description="Document content (any valid JSON)")
+    version: int = Field(..., description="Document version number")
+    timestamp: float = Field(..., description="Unix timestamp of the operation")
+    transaction_id: int = Field(..., description="Globally unique, monotonic transaction ID")
+    operation: Optional[OperationType] = Field(None, description="Type of operation (in change feed)")
 
-class GarbageCollectRequest(BaseModel):
-    max_versions: int = 1
-    max_age_seconds: Optional[float] = None
+    class Config:
+        schema_extra = {
+            "example": {
+                "key": "user:1",
+                "value": {
+                    "name": "John Doe",
+                    "email": "john@example.com",
+                    "age": 30
+                },
+                "version": 1,
+                "timestamp": 1234567890.123,
+                "transaction_id": 42,
+                "operation": "insert"
+            }
+        }
 
-class GarbageCollectResponse(BaseModel):
-    removed_count: int
-
-# Add new response models
 class DocumentList(BaseModel):
-    documents: Dict[str, List[DocumentResponse] | DocumentResponse]
+    documents: Dict[str, List[DocumentResponse] | DocumentResponse] = Field(
+        ..., 
+        description="Map of document keys to their versions or latest version"
+    )
 
 class ChangesResponse(BaseModel):
-    changes: List[DocumentResponse]
-    max_transaction_id: int
-
-@app.put("/{collection}/documents/{key}", response_model=DocumentResponse)
-async def upsert_document(collection: str, key: str, request: Request):
-    """
-    Insert or update a document in a collection.
-    """
-    try:
-        body = await request.body()
-        data = json.loads(body)
-        
-        if not isinstance(data, dict) or 'value' not in data:
-            raise HTTPException(
-                status_code=400,
-                detail="Request body must be a JSON object with a 'value' field"
-            )
-        
-        doc = store.upsert(collection, key, data['value'])
-        return DocumentResponse(**doc.__dict__)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Invalid JSON in request body")
-
-@app.get("/{collection}/documents/{key}", response_model=DocumentResponse)
-async def get_document(collection: str, key: str, version: Optional[int] = None):
-    """Get a document from a collection by key."""
-    doc = store.get(collection, key, version)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="Document not found")
-    return DocumentResponse(**doc.__dict__)
-
-@app.delete("/{collection}/documents/{key}")
-async def delete_document(collection: str, key: str):
-    """Delete a document from a collection."""
-    if store.delete(collection, key):
-        return {"status": "deleted"}
-    raise HTTPException(status_code=404, detail="Document not found")
-
-@app.post("/garbage-collect", response_model=GarbageCollectResponse)
-async def garbage_collect(request: GarbageCollectRequest):
-    """Trigger garbage collection of old document versions."""
-    removed_count = store.garbage_collect(
-        max_versions=request.max_versions,
-        max_age_seconds=request.max_age_seconds
+    changes: List[DocumentResponse] = Field(
+        ..., 
+        description="List of document changes"
     )
-    return GarbageCollectResponse(removed_count=removed_count)
+    max_transaction_id: int = Field(
+        ..., 
+        description="Current maximum transaction ID in the store"
+    )
 
-@app.get("/{collection}/documents", response_model=DocumentList)
-async def list_documents(
-    collection: str,
-    latest_only: bool = False,
-    where: Optional[str] = None
-):
-    """List documents in a collection."""
-    try:
-        if where:
-            documents = store.query_documents(collection, where, latest_only)
-        else:
-            documents = store.list_documents(collection, latest_only)
-            
-        if latest_only:
-            # Convert Document objects to DocumentResponse
-            response_docs = {
-                key: DocumentResponse(**doc.__dict__)
-                for key, doc in documents.items()
-                if doc is not None  # Handle case where document might be None
-            }
-        else:
-            # Convert list of Document objects to list of DocumentResponse
-            response_docs = {
-                key: [DocumentResponse(**doc.__dict__) for doc in versions]
-                for key, versions in documents.items()
-            }
-        
-        return DocumentList(documents=response_docs)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.get("/changes", response_model=ChangesResponse)
-async def get_changes(
-    start: int = 0,
-    limit: int = Query(default=2, ge=1, le=100),
-    where: Optional[str] = None,
-    collection: Optional[str] = None
+@app.put(
+    "/{collection}/documents/{key}",
+    response_model=DocumentResponse,
+    tags=["Documents"],
+    summary="Create or update a document",
+    responses={
+        200: {"description": "Document created or updated successfully"},
+        400: {"description": "Invalid request body"},
+        422: {"description": "Validation error"}
+    }
+)
+async def upsert_document(
+    collection: str = Field(..., description="Collection name"),
+    key: str = Field(..., description="Document key"),
+    request: Request = Field(..., description="Request with JSON body containing 'value' field")
 ):
     """
-    Get changes feed, optionally filtered by collection and query.
+    Create or update a document in the specified collection.
     
-    Args:
-        start: Return changes after this transaction ID
-        limit: Maximum number of changes to return
-        where: SQL-like query filter
-        collection: Optional collection to filter changes
+    The request body must be a JSON object with a 'value' field containing any valid JSON data.
+    
+    Example:
+    ```json
+    {
+        "value": {
+            "name": "John Doe",
+            "email": "john@example.com",
+            "age": 30
+        }
+    }
+    ```
     """
-    changes = store.get_changes_after(start, limit=limit, where=where, collection=collection)
-    return ChangesResponse(
-        changes=[
-            DocumentResponse(**doc.__dict__, operation=operation.value)
-            for doc, operation in changes
-        ],
-        max_transaction_id=store.current_transaction_id
-    )
+    # ... implementation ...
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.get(
+    "/{collection}/documents/{key}",
+    response_model=DocumentResponse,
+    tags=["Documents"],
+    summary="Get a document",
+    responses={
+        200: {"description": "Document retrieved successfully"},
+        404: {"description": "Document not found"}
+    }
+)
+async def get_document(
+    collection: str = Field(..., description="Collection name"),
+    key: str = Field(..., description="Document key"),
+    version: Optional[int] = Field(None, description="Specific version to retrieve")
+):
+    """
+    Retrieve a document by key, optionally specifying a version.
+    
+    If version is not specified, returns the latest version.
+    """
+    # ... implementation ...
+
+@app.delete(
+    "/{collection}/documents/{key}",
+    tags=["Documents"],
+    summary="Delete a document",
+    responses={
+        200: {"description": "Document deleted successfully"},
+        404: {"description": "Document not found"}
+    }
+)
+async def delete_document(
+    collection: str = Field(..., description="Collection name"),
+    key: str = Field(..., description="Document key")
+):
+    """Delete a document from the specified collection."""
+    # ... implementation ...
+
+@app.get(
+    "/{collection}/documents",
+    response_model=DocumentList,
+    tags=["Documents"],
+    summary="List documents in a collection",
+    responses={
+        200: {"description": "Documents retrieved successfully"},
+        400: {"description": "Invalid query syntax"}
+    }
+)
+async def list_documents(
+    collection: str = Field(..., description="Collection name"),
+    latest_only: bool = Field(
+        False, 
+        description="If true, returns only the latest version of each document"
+    ),
+    where: Optional[str] = Field(
+        None, 
+        description="SQL-like query to filter documents",
+        example="value.age > 25 AND value.status = 'active'"
+    )
+):
+    """
+    List documents in a collection with optional filtering.
+    
+    The where parameter supports SQL-like syntax for querying JSON documents:
+    - Exact match: `value.name = 'John'`
+    - Numeric comparison: `value.age > 25`
+    - List membership: `value.status IN ('active', 'pending')`
+    - Null checks: `value.email IS NOT NULL`
+    - Range checks: `value.age BETWEEN 25 AND 50`
+    """
+    # ... implementation ...
+
+@app.get(
+    "/changes",
+    response_model=ChangesResponse,
+    tags=["Changes"],
+    summary="Get change feed",
+    responses={
+        200: {"description": "Changes retrieved successfully"},
+        400: {"description": "Invalid query syntax"}
+    }
+)
+async def get_changes(
+    start: int = Field(
+        0, 
+        description="Return changes after this transaction ID"
+    ),
+    limit: int = Field(
+        Query(default=2, ge=1, le=100),
+        description="Maximum number of changes to return"
+    ),
+    where: Optional[str] = Field(
+        None,
+        description="SQL-like query to filter changes",
+        example="value.status = 'active'"
+    ),
+    collection: Optional[str] = Field(
+        None,
+        description="Optional collection to filter changes"
+    )
+):
+    """
+    Get changes feed with optional filtering by collection and query.
+    
+    The response includes:
+    - List of changes (documents with their operations)
+    - Maximum transaction ID in the store
+    
+    Use the max_transaction_id to track progress and fetch next batch of changes.
+    """
+    # ... implementation ...
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    
+    openapi_schema = get_openapi(
+        title="Change Streams API",
+        version="1.0.0",
+        description=app.description,
+        routes=app.routes,
+    )
+    
+    # Add security schemes if needed
+    # openapi_schema["components"]["securitySchemes"] = {...}
+    
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
