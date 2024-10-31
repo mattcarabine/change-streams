@@ -246,17 +246,31 @@ class KeyValueStore:
             # Sort by version (should already be sorted, but just to be safe)
             versions.sort(key=lambda x: x.version)
             
+            removed_versions = []
             # Keep only the newest max_versions
             if len(versions) > max_versions:
-                removed_count += len(versions) - max_versions
+                removed_versions.extend(versions[:-max_versions])
                 self.store[key] = versions[-max_versions:]
             
             # Remove versions older than max_age_seconds
             if max_age_seconds is not None:
-                self.store[key] = [
-                    doc for doc in self.store[key]
-                    if (current_time - doc.timestamp) <= max_age_seconds
-                ]
+                to_keep = []
+                for doc in self.store[key]:
+                    if (current_time - doc.timestamp) <= max_age_seconds:
+                        to_keep.append(doc)
+                    else:
+                        removed_versions.append(doc)
+                self.store[key] = to_keep
+
+            removed_count += len(removed_versions)
+            
+            # Update highest removed tombstone transaction ID
+            for doc in removed_versions:
+                if doc.value is None:  # This is a tombstone
+                    self.highest_removed_tombstone_id = max(
+                        getattr(self, 'highest_removed_tombstone_id', 0),
+                        doc.transaction_id
+                    )
                 
         self._save_to_disk()
         return removed_count

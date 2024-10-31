@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query, HTTPException, Path, Body
+from fastapi import FastAPI, Query, HTTPException, Path, Body, status
 from fastapi.openapi.utils import get_openapi
 from enum import Enum
 from typing import Optional, List, Dict, Any
@@ -70,13 +70,11 @@ class DocumentList(BaseModel):
     )
 
 class ChangesResponse(BaseModel):
-    changes: List[DocumentResponse] = Field(
-        ..., 
-        description="List of document changes"
-    )
-    max_transaction_id: int = Field(
-        ..., 
-        description="Current maximum transaction ID in the store"
+    changes: List[DocumentResponse]
+    max_transaction_id: int
+    needs_rollback: bool = Field(
+        False,
+        description="If true, the client needs to rollback and reload their data"
     )
 
 class DocumentInput(BaseModel):
@@ -171,7 +169,42 @@ async def list_documents(
     "/changes",
     response_model=ChangesResponse,
     tags=["Changes"],
-    summary="Get change feed"
+    summary="Get change feed",
+    responses={
+        200: {
+            "description": "Changes retrieved successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "changes": [
+                            {
+                                "key": "user:1",
+                                "value": {"name": "John"},
+                                "version": 1,
+                                "timestamp": 1234567890.123,
+                                "transaction_id": 42,
+                                "operation": "insert"
+                            }
+                        ],
+                        "max_transaction_id": 42,
+                        "needs_rollback": False
+                    }
+                }
+            }
+        },
+        409: {
+            "description": "Client needs to rollback and reload data",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "changes": [],
+                        "max_transaction_id": 42,
+                        "needs_rollback": True
+                    }
+                }
+            }
+        }
+    }
 )
 async def get_changes(
     start: int = Query(0, description="Return changes after this transaction ID"),
@@ -183,14 +216,29 @@ async def get_changes(
     ),
     collection: Optional[str] = Query(None, description="Optional collection to filter changes")
 ):
-    """Get changes feed with optional filtering by collection and query."""
+    """
+    Get changes feed with optional filtering by collection and query.
+    
+    If the client's start transaction ID is older than the oldest available
+    tombstone, a rollback response will be returned indicating that the
+    client needs to reload their data.
+    """
+    # Check if client needs to rollback
+    if start < store.highest_removed_tombstone_id:
+        return ChangesResponse(
+            changes=[],
+            max_transaction_id=store.current_transaction_id,
+            needs_rollback=True
+        )
+
     changes = store.get_changes_after(start, limit=limit, where=where, collection=collection)
     return ChangesResponse(
         changes=[
             DocumentResponse(**doc.__dict__, operation=operation.value)
             for doc, operation in changes
         ],
-        max_transaction_id=store.current_transaction_id
+        max_transaction_id=store.current_transaction_id,
+        needs_rollback=False
     )
 
 def custom_openapi():
