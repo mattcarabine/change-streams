@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+pythonenv*
+
+# Poetry
+dist/
+*.egg-info/
+poetry.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Project specific
+kvstore.json
+*.log
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# OS specific
+.DS_Store
+Thumbs.db
+*.bak
+*.tmp
+*.temp
+
+# Distribution / packaging
+build/
+develop-eggs/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg
+
+# Unit test / coverage reports
+.tox/
+.nox/
+.coverage.*
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
